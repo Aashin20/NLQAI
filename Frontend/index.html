@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CSV Query Assistant</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>CSV Query Assistant</h1>
+        <nav>
+            <button onclick="showPage('uploadPage')">Upload</button>
+            <button onclick="showPage('queryPage')">Query</button>
+        </nav>
+    </header>
+
+    <div class="container">
+        <div id="feedbackArea" class="feedback"></div>
+        <div id="loader" class="loader hidden"></div>
+
+        <section id="uploadPage" class="page">
+            <h2>Upload CSV</h2>
+            <input type="file" id="csvFile" accept=".csv">
+            <button id="uploadButton">Upload File</button>
+            <div id="tablesListSection" class="hidden">
+                <h3>Uploaded Tables</h3>
+                <ul id="uploadedTablesList"></ul>
+            </div>
+        </section>
+
+        <section id="queryPage" class="page hidden">
+            <div class="card">
+                <h2>Select Table</h2>
+                <label for="tableSelect">Choose a table:</label>
+                <select id="tableSelect" disabled>
+                    <option value="">-- Select a Table --</option>
+                </select>
+                <div id="schemaDisplay" class="schema-display hidden">
+                    <h3>Table Schema:</h3>
+                    <ul id="columnList"></ul>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>Ask Question</h2>
+                <label for="naturalQuery">Enter your question:</label>
+                <textarea id="naturalQuery" rows="4" placeholder="e.g., Show me names and ages for people older than 30"></textarea>
+                <button id="generateSqlButton" disabled>Generate SQL</button>
+            </div>
+
+            <div class="card hidden" id="sqlSection">
+                 <h2>Generated SQL Query</h2>
+                 <textarea id="generatedSql" rows="6" placeholder="SQL will appear here..." readonly></textarea>
+                 <button id="executeSqlButton" disabled>Execute SQL</button>
+            </div>
+
+            <div class="card hidden" id="resultsSection">
+                <h2>Query Results</h2>
+                <div id="resultsTableContainer"></div>
+            </div>
+        </section>
+
+    </div>
+
+    <footer>
+        <p>© 2024 CSV Query Assistant</p>
+    </footer>
+
+    <script src="script.js" defer></script>
+</body>
+</html>
