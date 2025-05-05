@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CSV Query Assistant</title>
+    <title>NLQ AI</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <header>
-        <h1>CSV Query Assistant</h1>
+        <h1>NLQ AI</h1>
         <nav>
             <button onclick="showPage('uploadPage')">Upload</button>
             <button onclick="showPage('queryPage')">Query</button>
@@ -31,28 +31,45 @@
 
         <section id="queryPage" class="page hidden">
             <div class="card">
-                <h2>Select Table</h2>
-                <label for="tableSelect">Choose a table:</label>
-                <select id="tableSelect" disabled>
-                    <option value="">-- Select a Table --</option>
-                </select>
-                <div id="schemaDisplay" class="schema-display hidden">
-                    <h3>Table Schema:</h3>
-                    <ul id="columnList"></ul>
+                <h2>Select Tables</h2>
+                <div class="table-selection">
+                    <div>
+                        <label for="primaryTableSelect">Primary Table:</label>
+                        <select id="primaryTableSelect" disabled>
+                            <option value="">-- Select a Primary Table --</option>
+                        </select>
+                        <div id="primarySchemaDisplay" class="schema-display hidden">
+                            <h3>Primary Table Schema:</h3>
+                            <ul id="primaryColumnList"></ul>
+                        </div>
+                    </div>
+                    
+                    <div id="additionalTablesSection">
+                        <label for="additionalTablesSelect">Additional Tables</label>
+                        <select id="additionalTablesSelect" multiple disabled>
+                            <option value="">-- Select Additional Tables --</option>
+                        </select>
+                        <small>Hold Ctrl/Cmd to select multiple tables</small>
+                        <div id="additionalSchemaDisplay" class="schema-display hidden">
+                            <h3>Additional Tables Schema:</h3>
+                            <div id="additionalColumnsContainer"></div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
             <div class="card">
                 <h2>Ask Question</h2>
                 <label for="naturalQuery">Enter your question:</label>
-                <textarea id="naturalQuery" rows="4" placeholder="e.g., Show me names and ages for people older than 30"></textarea>
+                <textarea id="naturalQuery" rows="4" placeholder="e.g., Show customers who purchased product X"></textarea>
+                <small class="hint">You can query across tables by asking questions involving data from multiple tables.</small>
                 <button id="generateSqlButton" disabled>Generate SQL</button>
             </div>
 
             <div class="card hidden" id="sqlSection">
-                 <h2>Generated SQL Query</h2>
-                 <textarea id="generatedSql" rows="6" placeholder="SQL will appear here..." readonly></textarea>
-                 <button id="executeSqlButton" disabled>Execute SQL</button>
+                <h2>Generated SQL Query</h2>
+                <textarea id="generatedSql" rows="8" placeholder="SQL will appear here..." readonly></textarea>
+                <button id="executeSqlButton" disabled>Execute SQL</button>
             </div>
 
             <div class="card hidden" id="resultsSection">
@@ -60,12 +77,8 @@
                 <div id="resultsTableContainer"></div>
             </div>
         </section>
-
     </div>
 
-    <footer>
-        <p>© 2024 CSV Query Assistant</p>
-    </footer>
 
     <script src="script.js" defer></script>
 </body>

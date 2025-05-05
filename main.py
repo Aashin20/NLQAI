@@ -3,37 +3,30 @@ import uuid
 import shutil
 import logging
 from contextlib import contextmanager
-from typing import Optional, List, Dict, Any # Added Dict, Any for query results
+from typing import Optional, List, Dict, Any
 import re
 
-# --- Database Imports ---
-from sqlalchemy import create_engine, Column, Integer, String, MetaData, text # Added text for raw SQL
-from sqlalchemy.exc import SQLAlchemyError # Import specific exception
+from sqlalchemy import create_engine, Column, Integer, String, MetaData, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import pandas as pd
 
-# --- FastAPI Imports ---
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# --- Groq Imports ---
 from groq import Groq, APIError
 
-# --- Dotenv Import ---
 from dotenv import load_dotenv
 
-# --- Logging Setup ---
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Load Environment Variables ---
 load_dotenv()
 
-# --- FastAPI App Initialization ---
-app = FastAPI(title="CSV Upload and SQL Execution API") # Updated title
+app = FastAPI(title="CSV Query Assistant with Multi-Table Support")
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,9 +36,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Database Setup ---
 DATABASE_URL = "sqlite:///./csv_data.db"
-# Consider read-only connection for the query endpoint if possible/needed, though difficult with shared engine
+
 engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -58,7 +50,6 @@ def get_db():
     finally:
         db.close()
 
-# --- Database Models ---
 class FileUpload(Base):
     __tablename__ = "file_uploads"
     id = Column(Integer, primary_key=True, index=True)
@@ -67,7 +58,6 @@ class FileUpload(Base):
 
 Base.metadata.create_all(bind=engine)
 
-# --- Groq Client Initialization ---
 try:
     groq_api_key = os.environ.get("GROQ_API_KEY")
     if not groq_api_key:
@@ -80,10 +70,10 @@ except Exception as e:
     logger.error(f"Failed to initialize Groq client: {e}", exc_info=True)
     groq_client = None
 
-# --- Pydantic Models ---
 class SQLQueryRequest(BaseModel):
     natural_language_query: str
-    table_name: str
+    primary_table_name: str
+    additional_tables: List[str] = []
 
 class TableInfo(BaseModel):
     table_name: str
@@ -96,7 +86,7 @@ class TablesResponse(BaseModel):
 class SQLQueryResponse(BaseModel):
     sql_query: str
     natural_language_query: str
-    table_name: str
+    tables_used: List[str]
 
 class UploadResponse(BaseModel):
     message: str
@@ -105,50 +95,67 @@ class UploadResponse(BaseModel):
     columns: List[str]
     rows: int
 
-# --- New Models for SQL Execution ---
 class ExecuteSQLRequest(BaseModel):
     sql_query: str
-    table_name: str # Keep for context/logging, though query might access others
+    primary_table_name: str
+    additional_tables: List[str] = []
 
 class QueryResultRow(BaseModel):
-     # Represents a single row. Using Dict[str, Any] for flexibility.
     row_data: Dict[str, Any]
 
 class QueryResultsResponse(BaseModel):
-    table_name: str
+    primary_table_name: str
+    additional_tables: List[str] = []
     sql_query: str
     columns: List[str]
-    results: List[Dict[str, Any]] # Return results as list of dicts
+    results: List[Dict[str, Any]]
     row_count: int
     message: Optional[str] = None
 
-
-# --- Utility Functions ---
 def sanitize_table_name(filename: str) -> str:
     base_name = os.path.splitext(filename)[0]
     sanitized = base_name.lower()
     sanitized = re.sub(r'[^\w]+', '_', sanitized)
-    sanitized = re.sub(r'^[^a-z_]+', '', sanitized)
+    sanitized = re.sub(r'^[^a-z]+', '', sanitized)
     if not sanitized or sanitized.startswith('_'):
-        sanitized = "tbl_" + sanitized
+        sanitized = "tbl" + sanitized
     if not sanitized:
         sanitized = f"tbl_{uuid.uuid4().hex[:8]}"
     return sanitized
 
-# --- API Endpoints ---
+def get_table_schema(table_name: str, metadata=None):
+    if metadata is None:
+        metadata = MetaData()
+        metadata.reflect(bind=engine, only=[table_name])
+    
+    if table_name not in metadata.tables:
+        return []
+    
+    table_obj = metadata.tables[table_name]
+    return [col.name for col in table_obj.columns]
+
+def get_all_table_schemas():
+    metadata = MetaData()
+    metadata.reflect(bind=engine)
+    table_schemas = {}
+    
+    for table_name in metadata.tables:
+        table_obj = metadata.tables[table_name]
+        table_schemas[table_name] = [col.name for col in table_obj.columns]
+    
+    return table_schemas
 
 @app.on_event("startup")
 async def startup():
     try:
-        with get_db():
-           logger.info("Database connection verified on startup.")
+        with get_db() as db:
+            logger.info("Database connection verified on startup.")
         if not groq_client:
-             logger.warning("Groq client not available on startup.")
+            logger.warning("Groq client not available on startup.")
     except Exception as e:
         logger.error(f"Error during startup: {e}", exc_info=True)
 
-
-@app.post("/upload", response_model=UploadResponse, summary="Upload a CSV file")
+@app.post("/upload", response_model=UploadResponse)
 async def upload_csv_file(
     file: UploadFile = File(...)
 ):
@@ -236,8 +243,11 @@ async def upload_csv_file(
                 logger.info(f"Removed temporary file '{temp_file_path}'")
             except OSError as e:
                 logger.error(f"Error removing temporary file '{temp_file_path}': {e}")
-
-
+def get_table_lock(table_name: str) -> threading.RLock:
+    with global_lock:
+        if table_name not in table_locks:
+            table_locks[table_name] = threading.RLock()
+        return table_locks[table_name]
 @app.get("/tables", response_model=TablesResponse)
 async def list_tables():
     logger.info("Request received for listing tables and columns.")
@@ -276,52 +286,52 @@ async def list_tables():
         logger.error(f"Error listing tables or reflecting schema: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An error occurred while retrieving table information: {str(e)}")
 
-
 @app.post("/generate-sql", response_model=SQLQueryResponse)
 async def generate_sql_query(request: SQLQueryRequest):
-    logger.info(f"Received request to generate SQL for table '{request.table_name}' from query: '{request.natural_language_query}'")
+    logger.info(f"Received request to generate SQL for primary table '{request.primary_table_name}' and additional tables {request.additional_tables} from query: '{request.natural_language_query}'")
 
     if not groq_client:
         logger.error("Attempted /generate-sql but Groq client is not initialized.")
         raise HTTPException(status_code=503, detail="Groq AI service unavailable. API key may be missing or invalid.")
 
-    table_name = request.table_name
+    primary_table = request.primary_table_name
+    additional_tables = request.additional_tables
     natural_query = request.natural_language_query
+    all_tables = [primary_table] + additional_tables
 
-    columns = []
-    try:
-        metadata = MetaData()
-        metadata.reflect(bind=engine, only=[table_name])
+    table_schemas = {}
+    metadata = MetaData()
+    metadata.reflect(bind=engine)
+    
+    for table_name in all_tables:
         if table_name not in metadata.tables:
             logger.warning(f"Table '{table_name}' not found in database schema for SQL generation.")
             raise HTTPException(status_code=404, detail=f"Table '{table_name}' not found.")
-
+        
         table_obj = metadata.tables[table_name]
         columns = [col.name for col in table_obj.columns]
+        table_schemas[table_name] = columns
         logger.info(f"Successfully retrieved columns for table '{table_name}': {columns}")
 
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        logger.error(f"Error reflecting schema for table '{table_name}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve schema for table '{table_name}'.")
+    if not table_schemas:
+        logger.error(f"No schema information could be retrieved for the specified tables.")
+        raise HTTPException(status_code=500, detail=f"Could not determine columns for the specified tables.")
 
-    if not columns:
-         logger.error(f"No columns found for table '{table_name}'.")
-         raise HTTPException(status_code=500, detail=f"Could not determine columns for table '{table_name}'.")
-
+    table_schemas_for_prompt = []
+    for table_name, columns in table_schemas.items():
+        table_schemas_for_prompt.append(f"Table Name: {table_name}\nColumns: {', '.join(columns)}")
+    
     prompt = f"""
-    You are an expert SQLite query generator.
-    Given the following table schema and a user's request in natural language, generate ONLY the corresponding SQLite SQL query.
+You are an expert SQLite query generator.
+Given the following table schemas and a user's request in natural language, generate ONLY the corresponding SQLite SQL query.
 
-    Table Name: {table_name}
-    Columns: {', '.join(columns)}
+{"\n\n".join(table_schemas_for_prompt)}
 
-    User's Request: {natural_query}
+User's Request: {natural_query}
 
-    Generate only the SQLite SQL query. Do not include any explanation, markdown formatting (like ```sql), or introductory text.
-    """
-    logger.debug(f"Constructed prompt for Groq.")
+Generate only the SQLite SQL query. Include proper JOIN statements if needed to query across multiple tables. Look for common column names across tables that could be used for joins. Do not include any explanation, markdown formatting (like ```sql), or introductory text.
+"""
+    logger.debug(f"Constructed prompt for Groq API with multi-table support.")
 
     try:
         logger.info("Sending request to Groq API...")
@@ -345,7 +355,7 @@ async def generate_sql_query(request: SQLQueryRequest):
         return SQLQueryResponse(
             sql_query=generated_sql,
             natural_language_query=natural_query,
-            table_name=table_name
+            tables_used=all_tables
         )
 
     except APIError as e:
@@ -355,27 +365,14 @@ async def generate_sql_query(request: SQLQueryRequest):
         logger.error(f"An unexpected error occurred during Groq API call: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An error occurred while generating the SQL query: {str(e)}")
 
-
-# --- NEW ENDPOINT for SQL Execution ---
-@app.post("/execute-sql", response_model=QueryResultsResponse, summary="Execute a SQL query")
+@app.post("/execute-sql", response_model=QueryResultsResponse)
 async def execute_sql(request: ExecuteSQLRequest):
-    """
-    Executes a provided SQL query (expected to be SELECT) against the database.
-
-    **Security Warning:** This endpoint executes raw SQL. While intended for
-    queries generated by the AI endpoint, ensure the source of the SQL query is trusted.
-    Only SELECT statements are permitted.
-
-    - **sql_query**: The SQL query string to execute.
-    - **table_name**: The primary table associated with the query (for context).
-    """
     sql_query = request.sql_query.strip()
-    table_name = request.table_name
+    primary_table_name = request.primary_table_name
+    additional_tables = request.additional_tables
 
-    logger.info(f"Received request to execute SQL query on table context '{table_name}':\n{sql_query}")
+    logger.info(f"Received request to execute SQL query on primary table '{primary_table_name}' with additional tables {additional_tables}:\n{sql_query}")
 
-    # ** Basic Security Check: Only allow SELECT statements **
-    # This is NOT foolproof against complex attacks but prevents simple misuse.
     if not sql_query.lower().startswith("select"):
         logger.warning(f"Rejected execution attempt for non-SELECT query: {sql_query}")
         raise HTTPException(status_code=400, detail="Invalid operation: Only SELECT queries are allowed.")
@@ -386,37 +383,32 @@ async def execute_sql(request: ExecuteSQLRequest):
     message = "Query executed successfully."
 
     try:
-        # Use engine.connect() for executing raw SQL directly
         with engine.connect() as connection:
             logger.info("Executing SQL query...")
-            # Use text() for clarity and potential future parameterization benefits
             cursor_result = connection.execute(text(sql_query))
 
-            # Check if the query returns rows (SELECT) or not (e.g., some CTEs might not)
             if cursor_result.returns_rows:
-                columns = list(cursor_result.keys()) # Get column names
-                fetched_rows = cursor_result.fetchall() # Fetch all rows
+                columns = list(cursor_result.keys())
+                fetched_rows = cursor_result.fetchall()
                 row_count = len(fetched_rows)
                 logger.info(f"Query returned {row_count} rows with columns: {columns}")
 
-                # Convert rows (which are SQLAlchemy Row objects) to dictionaries
                 results = [dict(row._mapping) for row in fetched_rows]
                 logger.debug(f"First few results (max 5): {results[:5]}")
             else:
                 logger.info("Query executed but did not return rows (e.g., UPDATE, INSERT - though blocked by check).")
                 message = "Query executed but did not return rows."
-                # row_count remains 0, columns and results remain empty
 
     except SQLAlchemyError as e:
         logger.error(f"Database error executing query: {e}", exc_info=True)
-        # Provide a generic error message but include specifics in the log
-        raise HTTPException(status_code=400, detail=f"Database error executing query: {e.orig}") # Show original error type if available
+        raise HTTPException(status_code=400, detail=f"Database error executing query: {e.orig}")
     except Exception as e:
         logger.error(f"Unexpected error executing query: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"An unexpected error occurred: {str(e)}")
 
     return QueryResultsResponse(
-        table_name=table_name,
+        primary_table_name=primary_table_name,
+        additional_tables=additional_tables,
         sql_query=sql_query,
         columns=columns,
         results=results,
@@ -424,9 +416,7 @@ async def execute_sql(request: ExecuteSQLRequest):
         message=message
     )
 
-
-# --- Main Execution ---
 if __name__ == "__main__":
     import uvicorn
     logger.info("Starting Uvicorn server...")
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)

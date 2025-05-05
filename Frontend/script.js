@@ -1,11 +1,22 @@
-document.addEventListener('DOMContentLoaded', () => {
-    const API_BASE_URL = 'http://127.0.0.1:8000';
+document.addEventListener('DOMContentLoaded', function() {
+    const API_BASE_URL = 'http://localhost:8000';
+    const UPLOAD_ENDPOINT = `${API_BASE_URL}/upload`;
+    const TABLES_ENDPOINT = `${API_BASE_URL}/tables`;
+    const GENERATE_SQL_ENDPOINT = `${API_BASE_URL}/generate-sql`;
+    const EXECUTE_SQL_ENDPOINT = `${API_BASE_URL}/execute-sql`;
 
+    const uploadPage = document.getElementById('uploadPage');
+    const queryPage = document.getElementById('queryPage');
     const csvFileInput = document.getElementById('csvFile');
     const uploadButton = document.getElementById('uploadButton');
-    const tableSelect = document.getElementById('tableSelect');
-    const schemaDisplay = document.getElementById('schemaDisplay');
-    const columnList = document.getElementById('columnList');
+    const tablesListSection = document.getElementById('tablesListSection');
+    const uploadedTablesList = document.getElementById('uploadedTablesList');
+    const primaryTableSelect = document.getElementById('primaryTableSelect');
+    const additionalTablesSelect = document.getElementById('additionalTablesSelect');
+    const primarySchemaDisplay = document.getElementById('primarySchemaDisplay');
+    const primaryColumnList = document.getElementById('primaryColumnList');
+    const additionalSchemaDisplay = document.getElementById('additionalSchemaDisplay');
+    const additionalColumnsContainer = document.getElementById('additionalColumnsContainer');
     const naturalQueryInput = document.getElementById('naturalQuery');
     const generateSqlButton = document.getElementById('generateSqlButton');
     const sqlSection = document.getElementById('sqlSection');
@@ -15,13 +26,364 @@ document.addEventListener('DOMContentLoaded', () => {
     const resultsTableContainer = document.getElementById('resultsTableContainer');
     const feedbackArea = document.getElementById('feedbackArea');
     const loader = document.getElementById('loader');
-    const uploadPage = document.getElementById('uploadPage');
-    const queryPage = document.getElementById('queryPage');
-    const uploadedTablesList = document.getElementById('uploadedTablesList');
-    const tablesListSection = document.getElementById('tablesListSection');
 
-    let selectedTableName = null;
-    let uploadedTableDetails = [];
+    let tables = [];
+    let tableSchemas = {};
+
+    initApp();
+
+    window.showPage = function(pageId) {
+        document.querySelectorAll('.page').forEach(page => {
+            page.classList.add('hidden');
+        });
+        document.getElementById(pageId).classList.remove('hidden');
+    };
+
+    function initApp() {
+        loadTables();
+        setupEventListeners();
+    }
+
+    function setupEventListeners() {
+        uploadButton.addEventListener('click', handleFileUpload);
+        primaryTableSelect.addEventListener('change', handlePrimaryTableChange);
+        additionalTablesSelect.addEventListener('change', handleAdditionalTablesChange);
+        generateSqlButton.addEventListener('click', generateSqlQuery);
+        executeSqlButton.addEventListener('click', executeSqlQuery);
+        naturalQueryInput.addEventListener('input', updateGenerateButtonState);
+    }
+
+    function loadTables() {
+        showLoader();
+        fetch(TABLES_ENDPOINT)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! Status: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                tables = data.tables;
+                populateTableSelections();
+                updateTablesList();
+                hideLoader();
+            })
+            .catch(error => {
+                console.error('Error loading tables:', error);
+                showFeedback('Error loading tables. Please check the API connection.', 'error');
+                hideLoader();
+            });
+    }
+
+    function populateTableSelections() {
+        primaryTableSelect.innerHTML = '<option value="">-- Select a Primary Table --</option>';
+        additionalTablesSelect.innerHTML = '';
+        
+        if (tables.length === 0) {
+            showFeedback('No tables available. Please upload a CSV file first.', 'error');
+            primaryTableSelect.disabled = true;
+            additionalTablesSelect.disabled = true;
+            return;
+        }
+
+        primaryTableSelect.disabled = false;
+        additionalTablesSelect.disabled = false;
+        
+        tables.forEach(table => {
+            const primaryOption = document.createElement('option');
+            primaryOption.value = table.table_name;
+            primaryOption.textContent = `${table.filename} (${table.table_name})`;
+            primaryTableSelect.appendChild(primaryOption);
+            
+            const additionalOption = document.createElement('option');
+            additionalOption.value = table.table_name;
+            additionalOption.textContent = `${table.filename} (${table.table_name})`;
+            additionalTablesSelect.appendChild(additionalOption);
+            
+            tableSchemas[table.table_name] = table.columns;
+        });
+    }
+
+    function updateTablesList() {
+        if (tables.length > 0) {
+            uploadedTablesList.innerHTML = '';
+            tables.forEach(table => {
+                const listItem = document.createElement('li');
+                listItem.textContent = `${table.filename} (Table: ${table.table_name}) - ${table.columns.length} columns`;
+                uploadedTablesList.appendChild(listItem);
+            });
+            tablesListSection.classList.remove('hidden');
+        } else {
+            tablesListSection.classList.add('hidden');
+        }
+    }
+
+    function handleFileUpload() {
+        const file = csvFileInput.files[0];
+        if (!file) {
+            showFeedback('Please select a CSV file to upload.', 'error');
+            return;
+        }
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        showLoader();
+        fetch(UPLOAD_ENDPOINT, {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(error => {
+                    throw new Error(error.detail || 'Upload failed');
+                });
+            }
+            return response.json();
+        })
+        .then(data => {
+            showFeedback(`File "${data.original_filename}" uploaded successfully as table "${data.table_name}".`, 'success');
+            csvFileInput.value = '';
+            loadTables();
+        })
+        .catch(error => {
+            console.error('Error uploading file:', error);
+            showFeedback(`Upload failed: ${error.message}`, 'error');
+            hideLoader();
+        });
+    }
+
+    function handlePrimaryTableChange() {
+        const selectedTable = primaryTableSelect.value;
+        
+        if (selectedTable) {
+            displayTableSchema(selectedTable, primaryColumnList);
+            primarySchemaDisplay.classList.remove('hidden');
+            updateAdditionalTablesOptions(selectedTable);
+            additionalTablesSelect.value = '';
+            additionalSchemaDisplay.classList.add('hidden');
+            additionalColumnsContainer.innerHTML = '';
+        } else {
+            primarySchemaDisplay.classList.add('hidden');
+            primaryColumnList.innerHTML = '';
+        }
+        
+        updateGenerateButtonState();
+    }
+
+    function updateAdditionalTablesOptions(primaryTable) {
+        const currentSelection = Array.from(additionalTablesSelect.selectedOptions).map(opt => opt.value);
+        
+        additionalTablesSelect.innerHTML = '';
+        
+        tables.forEach(table => {
+            if (table.table_name !== primaryTable) {
+                const option = document.createElement('option');
+                option.value = table.table_name;
+                option.textContent = `${table.filename} (${table.table_name})`;
+                option.selected = currentSelection.includes(table.table_name);
+                additionalTablesSelect.appendChild(option);
+            }
+        });
+    }
+
+    function handleAdditionalTablesChange() {
+        const selectedTables = Array.from(additionalTablesSelect.selectedOptions).map(opt => opt.value);
+        
+        if (selectedTables.length > 0) {
+            additionalColumnsContainer.innerHTML = '';
+            selectedTables.forEach(tableName => {
+                const tableInfoDiv = document.createElement('div');
+                tableInfoDiv.className = 'table-info';
+                
+                const tableTitle = document.createElement('h4');
+                tableTitle.textContent = tableName;
+                tableInfoDiv.appendChild(tableTitle);
+                
+                const columnsList = document.createElement('ul');
+                columnsList.className = 'column-list';
+                
+                if (tableSchemas[tableName]) {
+                    tableSchemas[tableName].forEach(column => {
+                        const columnItem = document.createElement('li');
+                        columnItem.textContent = column;
+                        columnsList.appendChild(columnItem);
+                    });
+                }
+                
+                tableInfoDiv.appendChild(columnsList);
+                additionalColumnsContainer.appendChild(tableInfoDiv);
+            });
+            
+            additionalSchemaDisplay.classList.remove('hidden');
+        } else {
+            additionalSchemaDisplay.classList.add('hidden');
+            additionalColumnsContainer.innerHTML = '';
+        }
+        
+        updateGenerateButtonState();
+    }
+
+    function displayTableSchema(tableName, containerElement) {
+        containerElement.innerHTML = '';
+        
+        if (tableSchemas[tableName]) {
+            tableSchemas[tableName].forEach(column => {
+                const listItem = document.createElement('li');
+                listItem.textContent = column;
+                containerElement.appendChild(listItem);
+            });
+        }
+    }
+
+    function generateSqlQuery() {
+        const primaryTable = primaryTableSelect.value;
+        const additionalTables = Array.from(additionalTablesSelect.selectedOptions).map(opt => opt.value);
+        const naturalQuery = naturalQueryInput.value.trim();
+        
+        if (!primaryTable || !naturalQuery) {
+            showFeedback('Please select a table and enter a query.', 'error');
+            return;
+        }
+        
+        const requestData = {
+            natural_language_query: naturalQuery,
+            primary_table_name: primaryTable,
+            additional_tables: additionalTables
+        };
+        
+        showLoader();
+        fetch(GENERATE_SQL_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(requestData)
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(error => {
+                    throw new Error(error.detail || 'SQL generation failed');
+                });
+            }
+            return response.json();
+        })
+        .then(data => {
+            generatedSqlTextarea.value = data.sql_query;
+            sqlSection.classList.remove('hidden');
+            executeSqlButton.disabled = false;
+            hideLoader();
+        })
+        .catch(error => {
+            console.error('Error generating SQL:', error);
+            showFeedback(`SQL generation failed: ${error.message}`, 'error');
+            hideLoader();
+        });
+    }
+
+    function executeSqlQuery() {
+        const primaryTable = primaryTableSelect.value;
+        const additionalTables = Array.from(additionalTablesSelect.selectedOptions).map(opt => opt.value);
+        const sqlQuery = generatedSqlTextarea.value.trim();
+        
+        if (!sqlQuery) {
+            showFeedback('No SQL query to execute.', 'error');
+            return;
+        }
+        
+        const requestData = {
+            sql_query: sqlQuery,
+            primary_table_name: primaryTable,
+            additional_tables: additionalTables
+        };
+        
+        showLoader();
+        fetch(EXECUTE_SQL_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(requestData)
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(error => {
+                    throw new Error(error.detail || 'SQL execution failed');
+                });
+            }
+            return response.json();
+        })
+        .then(data => {
+            displayQueryResults(data);
+            resultsSection.classList.remove('hidden');
+            hideLoader();
+        })
+        .catch(error => {
+            console.error('Error executing SQL:', error);
+            showFeedback(`SQL execution failed: ${error.message}`, 'error');
+            hideLoader();
+        });
+    }
+
+    function displayQueryResults(data) {
+        resultsTableContainer.innerHTML = '';
+        
+        if (data.row_count === 0) {
+            resultsTableContainer.innerHTML = '<p>No results found.</p>';
+            return;
+        }
+        
+        const table = document.createElement('table');
+        table.id = 'resultsTable';
+        
+        const thead = document.createElement('thead');
+        const headerRow = document.createElement('tr');
+        
+        data.columns.forEach(column => {
+            const th = document.createElement('th');
+            th.textContent = column;
+            headerRow.appendChild(th);
+        });
+        
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
+        
+        const tbody = document.createElement('tbody');
+        
+        data.results.forEach(row => {
+            const tr = document.createElement('tr');
+            
+            data.columns.forEach(column => {
+                const td = document.createElement('td');
+                td.textContent = row[column] !== null && row[column] !== undefined ? row[column] : '';
+                tr.appendChild(td);
+            });
+            
+            tbody.appendChild(tr);
+        });
+        
+        table.appendChild(tbody);
+        resultsTableContainer.appendChild(table);
+        
+        const summary = document.createElement('p');
+        summary.textContent = `${data.row_count} result${data.row_count !== 1 ? 's' : ''} found.`;
+        resultsTableContainer.appendChild(summary);
+    }
+
+    function updateGenerateButtonState() {
+        const primaryTable = primaryTableSelect.value;
+        const naturalQuery = naturalQueryInput.value.trim();
+        generateSqlButton.disabled = !(primaryTable && naturalQuery);
+    }
+
+    function showFeedback(message, type) {
+        feedbackArea.textContent = message;
+        feedbackArea.className = `feedback ${type}`;
+        
+        setTimeout(() => {
+            feedbackArea.className = 'feedback';
+        }, 5000);
+    }
 
     function showLoader() {
         loader.classList.remove('hidden');
@@ -30,269 +392,4 @@ document.addEventListener('DOMContentLoaded', () => {
     function hideLoader() {
         loader.classList.add('hidden');
     }
-
-    function displayFeedback(message, isError = false) {
-        feedbackArea.textContent = message;
-        feedbackArea.className = isError ? 'feedback error' : 'feedback success';
-        setTimeout(() => {
-             feedbackArea.textContent = '';
-             feedbackArea.className = 'feedback';
-        }, isError ? 8000 : 5000);
-    }
-
-    async function apiRequest(url, options = {}) {
-        showLoader();
-        try {
-            const response = await fetch(url, options);
-            if (!response.ok) {
-                let errorMsg = `HTTP error! Status: ${response.status}`;
-                try {
-                    const errData = await response.json();
-                    errorMsg = errData.detail || errorMsg;
-                } catch (e) {}
-                throw new Error(errorMsg);
-            }
-            const contentType = response.headers.get("content-type");
-            if (contentType && contentType.indexOf("application/json") !== -1) {
-                return await response.json();
-            } else {
-                return {};
-            }
-        } catch (error) {
-            console.error('API Request Error:', error);
-            displayFeedback(`Error: ${error.message}`, true);
-            throw error;
-        } finally {
-            hideLoader();
-        }
-    }
-
-    function resetQueryState() {
-        naturalQueryInput.value = '';
-        generatedSqlTextarea.value = '';
-        sqlSection.classList.add('hidden');
-        resultsSection.classList.add('hidden');
-        resultsTableContainer.innerHTML = '';
-        executeSqlButton.disabled = true;
-    }
-
-    async function fetchTables() {
-        try {
-            const data = await apiRequest(`${API_BASE_URL}/tables`);
-            uploadedTableDetails = data.tables || [];
-            populateTableSelect(uploadedTableDetails);
-            populateUploadedTablesList(uploadedTableDetails);
-            if (uploadedTableDetails.length > 0) {
-                 tableSelect.disabled = false;
-                 tablesListSection.classList.remove('hidden');
-            } else {
-                 tableSelect.disabled = true;
-                 tableSelect.innerHTML = '<option value="">-- No Tables Available --</option>';
-                 tablesListSection.classList.add('hidden');
-            }
-        } catch (error) {
-            tableSelect.disabled = true;
-            tableSelect.innerHTML = '<option value="">-- Error Loading Tables --</option>';
-            tablesListSection.classList.add('hidden');
-        }
-    }
-
-    function populateTableSelect(tables) {
-        tableSelect.innerHTML = '<option value="">-- Select a Table --</option>';
-        tables.forEach(table => {
-            const option = document.createElement('option');
-            option.value = table.table_name;
-            option.dataset.filename = table.filename;
-            option.dataset.columns = JSON.stringify(table.columns);
-            option.textContent = `${table.filename} (${table.table_name})`;
-            tableSelect.appendChild(option);
-        });
-        if (selectedTableName && tableSelect.querySelector(`option[value="${selectedTableName}"]`)) {
-            tableSelect.value = selectedTableName;
-            handleTableSelect();
-        } else {
-             selectedTableName = null;
-             schemaDisplay.classList.add('hidden');
-             generateSqlButton.disabled = true;
-             resetQueryState();
-        }
-    }
-
-    function populateUploadedTablesList(tables) {
-        uploadedTablesList.innerHTML = '';
-        tables.forEach(table => {
-            const li = document.createElement('li');
-            li.textContent = `${table.filename} (Table: ${table.table_name})`;
-            uploadedTablesList.appendChild(li);
-        });
-    }
-
-
-    function displaySchema(columns) {
-        columnList.innerHTML = '';
-        if (columns && columns.length > 0) {
-            columns.forEach(col => {
-                const li = document.createElement('li');
-                li.textContent = col;
-                columnList.appendChild(li);
-            });
-            schemaDisplay.classList.remove('hidden');
-        } else {
-            schemaDisplay.classList.add('hidden');
-        }
-    }
-
-     function populateResultsTable(columns, results) {
-        resultsTableContainer.innerHTML = '';
-        if (!results || results.length === 0) {
-            resultsTableContainer.textContent = 'Query executed successfully, but returned no rows.';
-            resultsSection.classList.remove('hidden');
-            return;
-        }
-
-        const table = document.createElement('table');
-        table.id = 'resultsTable';
-        const thead = table.createTHead();
-        const headerRow = thead.insertRow();
-        columns.forEach(colName => {
-            const th = document.createElement('th');
-            th.textContent = colName;
-            headerRow.appendChild(th);
-        });
-        const tbody = table.createTBody();
-        results.forEach(rowData => {
-            const row = tbody.insertRow();
-            columns.forEach(colName => {
-                const cell = row.insertCell();
-                cell.textContent = rowData[colName] !== null && rowData[colName] !== undefined ? rowData[colName] : 'NULL';
-            });
-        });
-
-        resultsTableContainer.appendChild(table);
-        resultsSection.classList.remove('hidden');
-    }
-
-    function handleUpload() {
-        const file = csvFileInput.files[0];
-        if (!file) {
-            displayFeedback("Please select a CSV file first.", true);
-            return;
-        }
-
-        const formData = new FormData();
-        formData.append('file', file);
-
-        apiRequest(`${API_BASE_URL}/upload`, {
-            method: 'POST',
-            body: formData,
-        }).then(result => {
-            displayFeedback(`Successfully uploaded '${result.original_filename}' as table '${result.table_name}'.`);
-            csvFileInput.value = '';
-            fetchTables();
-            showPage('queryPage');
-        }).catch(error => {});
-    }
-
-    function handleTableSelect() {
-        selectedTableName = tableSelect.value;
-        resetQueryState();
-
-        if (selectedTableName) {
-            const selectedOption = tableSelect.options[tableSelect.selectedIndex];
-            try {
-                const columns = JSON.parse(selectedOption.dataset.columns || '[]');
-                displaySchema(columns);
-            } catch(e) {
-                 console.error("Failed to parse columns from dataset", e);
-                 displaySchema([]);
-            }
-            generateSqlButton.disabled = false;
-        } else {
-            schemaDisplay.classList.add('hidden');
-            generateSqlButton.disabled = true;
-        }
-    }
-
-    function handleGenerateSql() {
-        const query = naturalQueryInput.value.trim();
-        if (!query) {
-            displayFeedback("Please enter your question first.", true);
-            return;
-        }
-        if (!selectedTableName) {
-            displayFeedback("Please select a table first.", true);
-            return;
-        }
-
-        apiRequest(`${API_BASE_URL}/generate-sql`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                natural_language_query: query,
-                table_name: selectedTableName
-            })
-        }).then(result => {
-            generatedSqlTextarea.value = result.sql_query || '';
-            sqlSection.classList.remove('hidden');
-            executeSqlButton.disabled = !result.sql_query;
-            resultsSection.classList.add('hidden');
-            displayFeedback("SQL generated successfully!", false);
-        }).catch(error => {
-             generatedSqlTextarea.value = '';
-             sqlSection.classList.add('hidden');
-             executeSqlButton.disabled = true;
-        });
-    }
-
-    function handleExecuteSql() {
-        const sqlQuery = generatedSqlTextarea.value.trim();
-         if (!sqlQuery) {
-            displayFeedback("SQL query is empty.", true);
-            return;
-        }
-        if (!selectedTableName) {
-            displayFeedback("No table context selected.", true);
-            return;
-        }
-         if (!sqlQuery.toLowerCase().startsWith('select')) {
-              displayFeedback("Only SELECT queries are allowed.", true);
-              return;
-         }
-
-
-        apiRequest(`${API_BASE_URL}/execute-sql`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                sql_query: sqlQuery,
-                table_name: selectedTableName
-            })
-        }).then(result => {
-             populateResultsTable(result.columns || [], result.results || []);
-             displayFeedback(result.message || "Query executed.", false);
-
-        }).catch(error => {
-            resultsSection.classList.add('hidden');
-             resultsTableContainer.innerHTML = '';
-        });
-    }
-
-    function showPage(pageId) {
-        uploadPage.classList.add('hidden');
-        queryPage.classList.add('hidden');
-
-        if (pageId === 'uploadPage') {
-            uploadPage.classList.remove('hidden');
-        } else if (pageId === 'queryPage') {
-            queryPage.classList.remove('hidden');
-        }
-    }
-
-    uploadButton.addEventListener('click', handleUpload);
-    tableSelect.addEventListener('change', handleTableSelect);
-    generateSqlButton.addEventListener('click', handleGenerateSql);
-    executeSqlButton.addEventListener('click', handleExecuteSql);
-
-    fetchTables();
-    showPage('uploadPage');
 });
